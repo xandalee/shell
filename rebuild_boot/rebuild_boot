@@ -1,0 +1,268 @@
+#!/bin/bash
+#获取发行版本
+function get_release {
+echo -n "Get system release : "
+release=`cat $ch_path/etc/klinux-release |cut -d _ -f4`
+if [ -z $release  ];then
+	echo -n "failed"
+	exit 1
+else
+	echo -n " success"
+#	echo $release
+	echo 
+fi
+}
+
+#格式化boot分区
+function format {
+	sleep 1
+	echo -n "Are you sure to format boot partition,Y/N? "
+	read reply
+	test $reply == "Y" && echo -n "Now format boot partition : " ||exit 0
+	num=`echo $release |awk -F '' '{print $NF}'`
+	#echo $num
+	umount /mnt/sysimage/boot
+	if [ $num -eq 3 ];then
+		mkfs.ext3 /dev/sda1 >$ch_path/tmp/rebuild_boot/format_log 2>&1 
+		test $? -ne 0 &&echo -n  "error"&&exit 1
+	else
+		mkfs.ext4 /dev/sda1 >$ch_path/tmp/rebuild_boot/format_log 2>&1 
+		test $? -ne 0 &&echo -n  "error"&&exit 1
+	fi
+	mount /dev/sda1 /mnt/sysimage/boot
+	test $? -eq 0 &&echo -n "success"
+	echo
+}
+
+#V3版本脚本
+function v3 {
+	sleep 1
+	repo_path=/mnt/source/CgsOS
+	echo -n "Reinstall packages : "
+	#获取RPM包名
+	kernel_p=`chroot $ch_path /bin/rpm -qa --qf '%{name}-%{version}-%{release}.%{arch}.rpm\n' 2>&1 |grep kernel`
+	logo_p=`chroot $ch_path /bin/rpm -qa --qf '%{name}-%{version}-%{release}.%{arch}.rpm\n' 2>&1 |grep "redhat-logo"`
+	cp $repo_path/$logo_p $ch_path/tmp/rebuild_boot/install/	
+	for i in $kernel_p
+		do
+			cp $repo_path/$i $ch_path/tmp/rebuild_boot/install/
+		done
+	#安装RPM包
+	sleep 3
+	list=`ls $ch_path/$package_path`
+	for t in $list
+		do
+		chroot $ch_path rpm -ivh $package_path/$t --force >>$ch_path/tmp/rebuild_boot/install_log 2>&1
+	 	test $? -ne 0 && echo -n "error" &&echo -e "\nInstall package $t error" &&exit 1
+		done
+	echo  -n "success"
+	echo
+	#拷贝grub目录文件
+	echo -n "Rebuild grub : "
+	sleep 1
+	arch=`chroot $ch_path /usr/bin/file /bin/bash |cut -d ' ' -f3`
+	if [ $arch == "32-bit" ];then
+		cp -r $ch_path/usr/share/grub/i386-redhat/* $ch_path/boot/grub/
+	 	test $? -ne 0 && echo -n "error" &&exit 1
+	else
+		cp -r $ch_path/usr/share/grub/x86_64-redhat/* $ch_path/boot/grub/
+	 	test $? -ne 0 && echo -n "error" &&exit 1
+	fi
+	#创建grub.conf
+	sleep 1
+	uname=`chroot $ch_path /bin/uname -r`
+	vmlinuz=`find $ch_path/boot |grep vmlinuz |grep -v "\.v" |cut -d '/' -f5`
+	root=`cat $ch_path/etc/fstab |grep '1 1' |awk '{printf $1}'`
+	initrd=`find $ch_path/boot |grep initrd |cut -d '/' -f5`
+#	echo -e "$vmlinuz\n$initrd"	
+	echo 'default=0' >>$grub_path
+	echo 'timeout=5' >>$grub_path
+	echo 'splashimage=(hd0,0)/grub/splash.xpm.gz' >>$grub_path
+	echo 'hiddenmenu' >>$grub_path
+	echo "title NewStart CGS Linux V3 ($uname)" >>$grub_path
+	echo -e "\troot (hd0,0)" >>$grub_path
+	echo -e "\tkernel /$vmlinuz ro root=$root quiet fsckroot" >>$grub_path
+	echo -e "\tinitrd /$initrd" >>$grub_path
+	test $? -ne 0 && echo -n "error" &&echo -e "\nError to write $grub_path file" &&exit 1
+	#创建menu.lst
+	sleep 1
+	cd $ch_path/boot/grub
+	ln -s ./grub.conf menu.lst
+	chroot $ch_path /sbin/grub-install /dev/sda --no-floppy --recheck >$ch_path/tmp/rebuild_boot/grub_install_log 2>&1 
+	test $? -ne 0 && echo -n "error" &&echo -e "\nError to excute grub-install" &&exit 1
+	echo  -n "success"
+	echo
+	#添加LABEL
+	sleep 1
+	echo -n "Rename boot label : "
+	e2label /dev/sda1 $label	
+	test $? -ne 0 && echo -n "error" &&echo -e "\nRename erroe" &&exit 1
+	echo  -n "success"
+	echo
+}
+
+#V4版本脚本
+function v4 {
+	sleep 1
+	echo -n "Mount Media : "
+	df |grep sr0 >/dev/null 2>&1
+	if [ $? -eq 0 ];then
+		umount /dev/sr0
+	fi
+	mount -o ro /dev/sr0 $ch_path/media
+	test $? -ne 0 &&echo -n "error" &&exit 1
+	echo -n "success"
+	echo
+	repo_path=$ch_path/media/CgsOS
+	echo -n "Reinstall packages : "
+	#获取RPM包名
+	sleep 1
+	kernel_p=`chroot $ch_path /bin/rpm -qa --qf '%{name}-%{version}-%{release}.%{arch}.rpm\n' 2>&1 |grep "^kernel"`
+	logo_p=`chroot $ch_path /bin/rpm -qa --qf '%{name}-%{version}-%{release}.%{arch}.rpm\n' 2>&1 |grep "redhat-logo"`
+	cgsl_p=`chroot $ch_path /bin/rpm -qa --qf '%{name}-%{version}-%{release}.%{arch}.rpm\n' 2>&1 |grep "cgsl-tmpfs-root"`
+	grub_p=`chroot $ch_path /bin/rpm -qa --qf '%{name}-%{version}-%{release}.%{arch}.rpm\n' 2>&1 |grep "grub-"`
+	cp $repo_path/$logo_p $ch_path/tmp/rebuild_boot/install/	
+	cp $repo_path/$cgsl_p $ch_path/tmp/rebuild_boot/install/
+	cp $repo_path/$grub_p $ch_path/tmp/rebuild_boot/install/
+	for i in $kernel_p
+		do
+			cp $repo_path/$i $ch_path/tmp/rebuild_boot/install/
+		done
+	#安装RPM包
+	sleep 3
+	list=`ls $ch_path/$package_path`
+	for t in $list
+		do
+		chroot $ch_path rpm -ivh $package_path/$t --force >>$ch_path/tmp/rebuild_boot/install_log 2>&1
+	 	test $? -ne 0 && echo -n "error" &&echo -e "\nInstall package $t error" &&exit 1
+		done
+	echo  -n "success"
+	echo
+	#拷贝grub目录文件
+	sleep 1
+	echo -n "Rebuild grub : "
+	arch=`chroot $ch_path /usr/bin/file /bin/bash |cut -d ' ' -f3`
+	if [ $arch == "32-bit" ];then
+		cp -r $ch_path/usr/share/grub/i386-unknown/* $ch_path/boot/grub/
+	 	test $? -ne 0 && echo -n "error" &&exit 1
+	else
+		cp -r $ch_path/usr/share/grub/x86_64-unknown/* $ch_path/boot/grub/
+	 	test $? -ne 0 && echo -n "error" &&exit 1
+	fi
+	#创建grub.conf
+	sleep 1
+	uname=`chroot $ch_path /bin/uname -r`
+	vmlinuz=`find $ch_path/boot |grep vmlinuz |grep -v "\.v" |grep -v "rescue" |cut -d '/' -f5`
+	root=`cat $ch_path/etc/fstab |grep '1 1' |awk '{printf $1}'`
+	initrd=`find $ch_path/boot |grep initramfs |cut -d '/' -f5`
+	vmlinuz_rescue=`find $ch_path/boot |grep vmlinuz |grep "rescue" |cut -d '/' -f5`
+	initrd_rescue=`find $ch_path/boot |grep initrd |cut -d '/' -f5`
+#	echo -e "$vmlinuz\n$initrd"	
+	echo 'default=0' >>$grub_path
+	echo 'timeout=5' >>$grub_path
+	echo 'splashimage=(hd0,0)/grub/splash.xpm.gz' >>$grub_path
+	echo 'hiddenmenu' >>$grub_path
+	echo "title NewStart CGS Linux V4 ($uname)" >>$grub_path
+	echo -e "\troot (hd0,0)" >>$grub_path
+	echo -e "\tkernel /$vmlinuz ro root=$root quiet enforing=0" >>$grub_path
+	echo -e "\tinitrd /$initrd" >>$grub_path
+	echo "title Rescue installed system" >>$grub_path
+	echo -e "\troot (hd0,0)" >>$grub_path
+	echo -e "\tkernel /$vmlinuz_rescue rescue" >>$grub_path
+	echo -e "\tinitrd /$initrd_rescue" >>$grub_path
+	test $? -ne 0 && echo -n "error" &&echo -e "\nError to write $grub_path file" &&exit 1
+	sleep 1
+	#创建menu.lst
+	sleep 1
+	cd $ch_path/boot/grub
+	ln -s ./grub.conf menu.lst
+	chroot $ch_path /sbin/grub-install /dev/sda --no-floppy --recheck >$ch_path/tmp/rebuild_boot/grub_install_log 2>&1 
+	test $? -ne 0 && echo -n "error" &&echo -e "\nError to excute grub-install" &&exit 1
+	echo  -n "success"
+	echo
+	#修改fstab
+	sleep 1
+	echo -n "Modify fstab : "
+	new_uuid=`blkid /dev/sda1 |awk '{printf $2}' |sed 's/"//g'`
+	test $? -ne 0 && echo -n "error" &&echo -e "\nGet device's new_uuid error." &&exit 1
+	old_uuid=`cat $ch_path/etc/fstab |grep '1 2' |grep boot |awk '{printf $1}'`
+	test $? -ne 0 && echo -n "error" &&echo -e "\nGet device's old_uuid error." &&exit 1
+	sed -i "s/$old_uuid/$new_uuid/g" $ch_path/etc/fstab
+	test $? -ne 0 && echo -n "error" &&echo -e "\nWrite to fstab error." &&exit 1
+	chroot $ch_path /bin/mount -a
+		test $? -ne 0 && echo -n "warn" &&echo -e "\nWARN: plesase check $ch_path/etc/fstab and modify it manually." &&exit 1
+	echo  -n "success"
+	echo
+}
+
+#V5版本脚本
+function v5 {
+	repo_path=/run/install/repo/CgsOS
+	echo -n "Reinstall packages : "
+	#获取RPM包名
+	sleep 1
+	kernel_p=`chroot $ch_path /bin/rpm -qa --qf '%{name}-%{version}-%{release}.%{arch}.rpm\n' 2>&1 |grep "^kernel"`
+	logo_p=`chroot $ch_path /bin/rpm -qa --qf '%{name}-%{version}-%{release}.%{arch}.rpm\n' 2>&1 |grep "centos-logos"`
+	grub_p=`chroot $ch_path /bin/rpm -qa --qf '%{name}-%{version}-%{release}.%{arch}.rpm\n' 2>&1 |grep "grub2"`
+	cp $repo_path/$logo_p $ch_path/tmp/rebuild_boot/install/	
+	for g in $grub_p
+		do
+			cp $repo_path/$g $ch_path/tmp/rebuild_boot/install/
+		done
+	for i in $kernel_p
+		do
+			cp $repo_path/$i $ch_path/tmp/rebuild_boot/install/
+		done
+	#安装RPM包
+	sleep 3
+	list=`ls $ch_path/$package_path`
+	for t in $list
+		do
+		chroot $ch_path rpm -ivh $package_path/$t --force >>$ch_path/tmp/rebuild_boot/install_log 2>&1
+	 	test $? -ne 0 && echo -n "error" &&echo -e "\nInstall package $t error" &&exit 1
+		done
+	echo  -n "success"
+	echo
+	#拷贝grub目录文件
+	sleep 1
+	echo -n "Rebuild grub : "
+	chroot $ch_path /sbin/grub2-mkconfig -o /boot/grub2/grub.cfg >>$ch_path/tmp/rebuild_boot/grub2_mkconfig_log 2>&1
+	test $? -ne 0 && echo -n "error" &&echo -e "\nMkconfig error" &&exit 1
+	chroot $ch_path /sbin/grub2-install /dev/sda --no-floppy --recheck >>$ch_path/tmp/rebuild_boot/grub2_install_log 2>&1
+	test $? -ne 0 && echo -n "error" &&echo -e "\nInstall error" &&exit 1
+	sed -i '1asaved_entry=NewStart CGS Linux Linux, with Linux 3.10.0-123.el7.x86_64' $ch_path/boot/grub2/grubenv
+	test $? -ne 0 && echo -n "error" &&exit 1
+	echo  -n "success"
+	echo
+	#修改fstab
+	sleep 1
+	echo -n "Modify fstab : "
+	new_uuid=`blkid /dev/sda1 |awk '{printf $2}' |sed 's/"//g'`
+	test $? -ne 0 && echo -n "error" &&echo -e "\nGet device's new_uuid error." &&exit 1
+	old_uuid=`cat $ch_path/etc/fstab |grep '1 2' |grep boot |awk '{printf $1}'`
+	test $? -ne 0 && echo -n "error" &&echo -e "\nGet device's old_uuid error." &&exit 1
+	sed -i "s/$old_uuid/$new_uuid/g" $ch_path/etc/fstab
+	test $? -ne 0 && echo -n "error" &&echo -e "\nWrite to fstab error." &&exit 1
+	chroot $ch_path /bin/mount -a
+		test $? -ne 0 && echo -n "warn" &&echo -e "\nWARN: plesase check $ch_path/etc/fstab and modify it manually." &&exit 1
+	echo  -n "success"
+	echo
+}
+
+#运行主体
+ch_path=/mnt/sysimage
+package_path=/tmp/rebuild_boot/install
+grub_path=$ch_path/boot/grub/grub.conf
+mkdir -p $ch_path/$package_path
+label=`e2label /dev/sda1`
+get_release
+format
+if [ $release == "V3" ];then
+	v3
+elif [ $release == "V4"  ];then
+	v4
+else
+	v5
+fi
+echo -e "\n\nLogs are stored in $ch_path/tmp/rebuild_boot."
+exit 0
